@@ -2,41 +2,39 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { GoogleGenAI } from "@google/genai";
-import { jawedKnowledge } from "./jawedKnowledge.js";
+import { feedbackKnowledge, chatbotKnowledge } from "./jawedKnowledge.js";
 
 const app = express();
 
-// Middlewares
 app.use(cors());
 app.use(express.json());
 
-// Gemini client
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-});
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 const PRIMARY_MODEL = "gemini-2.5-flash";
 
 async function generateWithFallback(prompt) {
-  try {
-    const response = await ai.models.generateContent({
-      model: PRIMARY_MODEL,
-      contents: prompt,
-      config: { temperature: 0.3 },
-    });
-    return { response, modelUsed: PRIMARY_MODEL };
-  } catch (err) {
-    console.error("Primary model error:", err?.status, err?.message);
-    throw err;
-  }
+  const response = await ai.models.generateContent({
+    model: PRIMARY_MODEL,
+    contents: prompt,
+    config: { temperature: 0.3 },
+  });
+  return { response, modelUsed: PRIMARY_MODEL };
 }
 
-// Health check endpoint
+function getResponseText(response) {
+  return (
+    response?.text ??
+    response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ??
+    ""
+  );
+}
+
 app.get("/", (req, res) => {
   res.send("Chatbot server is running ✅");
 });
 
-// Chat endpoint
+// feedback endpoint
 app.post("/api/feedback", async (req, res) => {
   try {
     const { phrase_text, level } = req.body;
@@ -45,24 +43,29 @@ app.post("/api/feedback", async (req, res) => {
       return res.status(400).json({ reply: "Missing phrase_text or level." });
     }
 
+    const allowedLevels = ["Beginner", "Intermediate", "Advanced"];
+    if (!allowedLevels.includes(level)) {
+      return res.status(400).json({
+        reply: "Invalid level. Use Beginner, Intermediate, or Advanced.",
+      });
+    }
+
     const prompt = `
-${jawedKnowledge}
+${feedbackKnowledge}
 
-العبارة: ${phrase_text}
+phrase_text: ${phrase_text}
+level: ${level}
 
-المستوى: ${level}
-
-الآن أجب على آخر رسالة من المستخدم بطريقة ودّية ومختصرة.
-ركّز فقط على المعلومات المتعلقة بتطبيق التجويد.
-إذا لم تكن متأكدًا من شيء، قل إنك غير متأكد واقترح الرجوع إلى توثيق التطبيق.
+التزم حرفيًا بالهيكل والقواعد الموجودة في المعرفة أعلاه.
+لا تخرج عن موضوع التجويد.
 `;
 
     const { response, modelUsed } = await generateWithFallback(prompt);
+    const text = getResponseText(response);
 
-    const text = response.text;
     res.json({ reply: text, modelUsed });
   } catch (error) {
-    console.error("Gemini error (after fallback):", error);
+    console.error("Gemini error:", error);
     res.status(500).json({
       reply:
         "Sorry, something went wrong while talking to the AI. Please try again later.",
@@ -70,7 +73,43 @@ ${jawedKnowledge}
   }
 });
 
-// Start server
+// Chat endpoint
+app.post("/api/chat", async (req, res) => {
+  try {
+    const { history } = req.body;
+
+    if (!Array.isArray(history) || history.length === 0) {
+      return res.status(400).json({ reply: "No history provided." });
+    }
+
+    const conversationText = history
+      .map((m) => `${m.role === "user" ? "المستخدم" : "المساعد"}: ${m.text}`)
+      .join("\n");
+
+    const prompt = `
+${chatbotKnowledge}
+
+المحادثة حتى الآن:
+${conversationText}
+
+أجب على آخر رسالة من المستخدم بطريقة ودّية ومختصرة.
+ركّز فقط على المعلومات المتعلقة بتطبيق "جود" وتعلّم التجويد.
+إذا لم تكن متأكدًا من شيء، قل إنك غير متأكد واقترح الرجوع إلى توثيق التطبيق.
+`;
+
+    const { response, modelUsed } = await generateWithFallback(prompt);
+    const text = getResponseText(response);
+
+    res.json({ reply: text, modelUsed });
+  } catch (error) {
+    console.error("Gemini error:", error);
+    res.status(500).json({
+      reply:
+        "Sorry, something went wrong while talking to the AI. Please try again later.",
+    });
+  }
+});
+
 const PORT = process.env.PORT || 4000;
 
 app.listen(PORT, () => {
